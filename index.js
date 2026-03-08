@@ -20,15 +20,32 @@ if (initWorker) {
             const accountId = payload.account?.id || 2;
             const content = payload.content;
             
-            console.log(`📡 Processing message with memory: ${content}`);
+            console.log(`📡 Processing message with memory & clock: ${content}`);
 
-            const systemPrompt = process.env.SYSTEM_PROMPT || "אתה עוזר וירטואלי.";
+            // 1. בדיקת שעות פעילות (שעון ישראל)
+            const now = new Date();
+            const israelTime = new Date(now.toLocaleString("en-US", {timeZone: "Asia/Jerusalem"}));
+            const day = israelTime.getDay(); // 0 = ראשון, 4 = חמישי
+            const hour = israelTime.getHours();
+
+            const isWorkDay = day >= 0 && day <= 4;
+            const isWorkHour = hour >= 8 && hour < 17;
+            const isOutsideBusinessHours = !(isWorkDay && isWorkHour);
+
+            let systemPrompt = process.env.SYSTEM_PROMPT || "אתה עוזר וירטואלי.";
+            
+            // אם אנחנו מחוץ לשעות הפעילות, מוסיפים הוראה סודית לבוט
+            if (isOutsideBusinessHours) {
+                systemPrompt += "\n\nהוראת מערכת קריטית: כעת מחוץ לשעות הפעילות של המשרד. עליך לאסוף את כל המידע מהלקוח כרגיל. עם זאת, בשלב הסיכום וההעברה (Handoff), חובה עליך לציין שמשרדינו סגורים כעת, והפנייה הועברה לנציג שיטפל בה ביום העסקים הבא. זכור להוסיף את התגית [LABEL: ...] בסוף ההודעה כמקובל.";
+                console.log('🌙 Outside business hours - instructed AI to mention next business day.');
+            }
+
             const CHATWOOT_URL = process.env.CHATWOOT_BASE_URL || 'http://localhost:3000';
             const CHATWOOT_TOKEN = process.env.CHATWOOT_API_ACCESS_TOKEN;
 
             let chatHistory = [];
 
-            // 1. משיכת היסטוריית השיחה מ-Chatwoot
+            // 2. משיכת היסטוריית השיחה מ-Chatwoot
             if (CHATWOOT_TOKEN) {
                 try {
                     const histRes = await fetch(`${CHATWOOT_URL}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`, {
@@ -38,7 +55,6 @@ if (initWorker) {
                         const histData = await histRes.json();
                         const msgArray = Array.isArray(histData) ? histData : (histData.payload || []);
                         
-                        // סידור מהישן לחדש ולקיחת 10 ההודעות האחרונות
                         msgArray.sort((a, b) => a.id - b.id);
                         const recentMsgs = msgArray.slice(-10);
                         
@@ -53,7 +69,6 @@ if (initWorker) {
                 }
             }
 
-            // 2. סידור ההיסטוריה לפורמט שגוגל דורש (חייב להיות user -> model -> user בהתאמה)
             let validHistory = [];
             let expectedRole = 'user';
             
@@ -62,12 +77,10 @@ if (initWorker) {
                     validHistory.push(msg);
                     expectedRole = expectedRole === 'user' ? 'model' : 'user';
                 } else if (validHistory.length > 0 && msg.role === validHistory[validHistory.length - 1].role) {
-                    // איחוד הודעות עוקבות מאותו סוג
                     validHistory[validHistory.length - 1].parts[0].text += `\n${msg.parts[0].text}`;
                 }
             }
             
-            // גוגל דורש שההודעה האחרונה שתשלח אליו תהיה של המשתמש
             if (validHistory.length > 0 && validHistory[validHistory.length - 1].role === 'model') {
                 validHistory.pop();
             }
@@ -75,7 +88,7 @@ if (initWorker) {
                 validHistory = [{ role: 'user', parts: [{ text: content }] }];
             }
 
-            // 3. שליחה לגוגל עם כל ההקשר
+            // 3. שליחה לגוגל
             const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -91,7 +104,7 @@ if (initWorker) {
             let aiReply = data.candidates[0].content.parts[0].text;
             let labelToAdd = null;
 
-            // 4. זיהוי תגיות (Labels) לניתוב שיחה מתוך התשובה
+            // 4. חילוץ התגית
             const labelRegex = /\[LABEL:\s*(.*?)\]/;
             const match = aiReply.match(labelRegex);
 
@@ -101,13 +114,13 @@ if (initWorker) {
                 console.log(`🏷️ AI decided to add label: ${labelToAdd}`);
             }
 
-            // 5. שליחת התשובה לוואטסאפ
+            // 5. שליחה ללקוח
             if (aiReply) {
                 await chatwootService.sendMessage(accountId, conversationId, aiReply);
                 console.log(`✅ Success! Sent to WhatsApp`);
             }
 
-            // 6. הוספת התווית ב-Chatwoot (אם ה-AI קבע)
+            // 6. הוספת תווית
             if (labelToAdd && CHATWOOT_TOKEN) {
                 await fetch(`${CHATWOOT_URL}/api/v1/accounts/${accountId}/conversations/${conversationId}/labels`, {
                     method: 'POST',
@@ -125,4 +138,4 @@ if (initWorker) {
     });
 }
 
-app.listen(3100, () => console.log('🚀 DIRECT API MODE ACTIVE (With Memory & Routing)'));
+app.listen(3100, () => console.log('🚀 DIRECT API MODE ACTIVE (With Memory, Routing & Clock)'));
